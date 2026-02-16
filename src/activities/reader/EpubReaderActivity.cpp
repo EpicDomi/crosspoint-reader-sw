@@ -15,6 +15,7 @@
 #include "KOReaderSyncActivity.h"
 #include "MappedInputManager.h"
 #include "RecentBooksStore.h"
+#include "StopwatchPopupActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -178,6 +179,7 @@ void EpubReaderActivity::loop() {
         this->renderer, this->mappedInput, epub->getTitle(), currentPage, totalPages, bookProgressPercent,
         SETTINGS.orientation, [this](const uint8_t orientation) { onReaderMenuBack(orientation); },
         [this](EpubReaderMenuActivity::MenuAction action) { onReaderMenuConfirm(action); }));
+    return;
   }
 
   // Long press BACK (1s+) goes to file selection
@@ -200,6 +202,67 @@ void EpubReaderActivity::loop() {
                                                     mappedInput.wasReleased(MappedInputManager::Button::Left));
   const bool powerPageTurn = SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::PAGE_TURN &&
                              mappedInput.wasReleased(MappedInputManager::Button::Power);
+  const bool stopwatchTriggered = SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::STOPWATCH &&
+                                  mappedInput.wasReleased(MappedInputManager::Button::Power);
+
+  if (stopwatchTriggered) {
+    if (!stopwatchRunning) {
+      stopwatchRunning = true;
+      stopwatchStartTime = millis();
+      stopwatchPageDelta = 0;
+
+      {
+        RenderLock lock(*this);
+        if (section && section->pageCount > 0) {
+          const float chapterProgress =
+              static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
+          stopwatchStartBookProgress = epub->calculateProgress(currentSpineIndex, chapterProgress);
+        } else {
+          stopwatchStartBookProgress = 0.0f;
+        }
+      }
+
+      requestUpdate();
+    } else {
+      stopwatchRunning = false;
+
+      // If we haven't progressed forward, just cancel without popup
+      if (stopwatchPageDelta <= 0) {
+        requestUpdate();  // Just to refresh icon off
+        return;
+      }
+
+      unsigned long duration = millis() - stopwatchStartTime;
+      int pagesRead = stopwatchPageDelta;
+
+      int estimatedRemainingSeconds = -1;
+
+      {
+        RenderLock lock(*this);
+        if (section && section->pageCount > 0) {
+          const float chapterProgress =
+              static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
+          float currentBookProgress = epub->calculateProgress(currentSpineIndex, chapterProgress);
+          float progressDelta = currentBookProgress - stopwatchStartBookProgress;
+
+          if (progressDelta > 0.0001f) {
+            float rate = duration / progressDelta;  // ms per 1.0 progress (full book)
+            float remainingProgress = 1.0f - currentBookProgress;
+            estimatedRemainingSeconds = (remainingProgress * rate) / 1000;
+          }
+        }
+      }
+
+      // Launch popup as subactivity
+      enterNewActivity(
+          new StopwatchPopupActivity(renderer, mappedInput, duration, pagesRead, estimatedRemainingSeconds, [this]() {
+            exitActivity();   // Close popup
+            requestUpdate();  // Refresh screen to clear popup
+          }));
+      return;
+    }
+  }
+
   const bool nextTriggered = usePressForPageTurn
                                  ? (mappedInput.wasPressed(MappedInputManager::Button::PageForward) || powerPageTurn ||
                                     mappedInput.wasPressed(MappedInputManager::Button::Right))
@@ -226,6 +289,12 @@ void EpubReaderActivity::loop() {
       RenderLock lock(*this);
       nextPageNumber = 0;
       currentSpineIndex = nextTriggered ? currentSpineIndex + 1 : currentSpineIndex - 1;
+      if (stopwatchRunning) {
+        if (nextTriggered)
+          stopwatchPageDelta++;
+        else
+          stopwatchPageDelta--;
+      }
       section.reset();
     }
     requestUpdate();
@@ -241,12 +310,14 @@ void EpubReaderActivity::loop() {
   if (prevTriggered) {
     if (section->currentPage > 0) {
       section->currentPage--;
+      if (stopwatchRunning) stopwatchPageDelta--;
     } else if (currentSpineIndex > 0) {
       // We don't want to delete the section mid-render, so grab the semaphore
       {
         RenderLock lock(*this);
         nextPageNumber = UINT16_MAX;
         currentSpineIndex--;
+        if (stopwatchRunning) stopwatchPageDelta--;
         section.reset();
       }
     }
@@ -254,12 +325,14 @@ void EpubReaderActivity::loop() {
   } else {
     if (section->currentPage < section->pageCount - 1) {
       section->currentPage++;
+      if (stopwatchRunning) stopwatchPageDelta++;
     } else {
       // We don't want to delete the section mid-render, so grab the semaphore
       {
         RenderLock lock(*this);
         nextPageNumber = 0;
         currentSpineIndex++;
+        if (stopwatchRunning) stopwatchPageDelta++;
         section.reset();
       }
     }
@@ -486,6 +559,10 @@ void EpubReaderActivity::applyOrientation(const uint8_t orientation) {
 
 // TODO: Failure handling
 void EpubReaderActivity::render(Activity::RenderLock&& lock) {
+  if (subActivity) {
+    return;
+  }
+
   if (!epub) {
     return;
   }
@@ -745,6 +822,18 @@ void EpubReaderActivity::renderStatusBar(const int orientedMarginRight, const in
     progressTextWidth = renderer.getTextWidth(SMALL_FONT_ID, progressStr);
     renderer.drawText(SMALL_FONT_ID, renderer.getScreenWidth() - orientedMarginRight - progressTextWidth, textY,
                       progressStr);
+
+    if (stopwatchRunning) {
+      // Target height: 12px (Matching Battery Height).
+      // Battery draws at textY + 6.
+
+      const int iconHeight = 12;
+      const int iconWidth = 10;  // Derived from height logic (12 - 2 button)
+      const int iconY = textY + 6;
+      const int iconX = renderer.getScreenWidth() - orientedMarginRight - progressTextWidth - iconWidth - 6;
+
+      GUI.drawStopwatchIcon(renderer, iconX, iconY, iconHeight);
+    }
   }
 
   if (showBookProgressBar) {
@@ -763,7 +852,6 @@ void EpubReaderActivity::renderStatusBar(const int orientedMarginRight, const in
     GUI.drawBatteryLeft(renderer, Rect{orientedMarginLeft + 1, textY, metrics.batteryWidth, metrics.batteryHeight},
                         showBatteryPercentage);
   }
-
   if (showChapterTitle) {
     // Centered chatper title text
     // Page width minus existing content with 30px padding on each side

@@ -3,6 +3,7 @@
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
+#include <Logging.h>
 #include <Serialization.h>
 #include <Utf8.h>
 
@@ -10,6 +11,7 @@
 #include "CrossPointState.h"
 #include "MappedInputManager.h"
 #include "RecentBooksStore.h"
+#include "StopwatchPopupActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -101,6 +103,51 @@ void TxtReaderActivity::loop() {
                                                     mappedInput.wasReleased(MappedInputManager::Button::Left));
   const bool powerPageTurn = SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::PAGE_TURN &&
                              mappedInput.wasReleased(MappedInputManager::Button::Power);
+  const bool stopwatchTriggered = SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::STOPWATCH &&
+                                  mappedInput.wasReleased(MappedInputManager::Button::Power);
+
+  if (stopwatchTriggered) {
+    if (!stopwatchRunning) {
+      stopwatchRunning = true;
+      stopwatchStartTime = millis();
+      stopwatchPageDelta = 0;
+      requestUpdate();
+    } else {
+      stopwatchRunning = false;
+
+      if (stopwatchPageDelta <= 0) {
+        requestUpdate();
+        return;
+      }
+
+      unsigned long duration = millis() - stopwatchStartTime;
+      int pagesRead = stopwatchPageDelta;
+
+      int estimatedRemainingSeconds = -1;
+
+      // Lock not strictly needed for scalar values but good practice if threading changes
+      {
+        RenderLock lock(*this);
+        int pagesRemaining = totalPages - currentPage - 1;
+        if (pagesRemaining < 0) pagesRemaining = 0;
+
+        if (pagesRead > 0) {
+          unsigned long long durationMs64 = duration;
+          unsigned long long remainingMs = (durationMs64 * pagesRemaining) / pagesRead;
+          estimatedRemainingSeconds = remainingMs / 1000;
+        }
+      }
+
+      // Launch popup as subactivity
+      enterNewActivity(
+          new StopwatchPopupActivity(renderer, mappedInput, duration, pagesRead, estimatedRemainingSeconds, [this]() {
+            exitActivity();   // Close popup
+            requestUpdate();  // Refresh screen to clear popup
+          }));
+      return;
+    }
+  }
+
   const bool nextTriggered = usePressForPageTurn
                                  ? (mappedInput.wasPressed(MappedInputManager::Button::PageForward) || powerPageTurn ||
                                     mappedInput.wasPressed(MappedInputManager::Button::Right))
@@ -113,9 +160,11 @@ void TxtReaderActivity::loop() {
 
   if (prevTriggered && currentPage > 0) {
     currentPage--;
+    if (stopwatchRunning) stopwatchPageDelta--;
     requestUpdate();
   } else if (nextTriggered && currentPage < totalPages - 1) {
     currentPage++;
+    if (stopwatchRunning) stopwatchPageDelta++;
     requestUpdate();
   }
 }
@@ -340,6 +389,10 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
 }
 
 void TxtReaderActivity::render(Activity::RenderLock&&) {
+  if (subActivity) {
+    return;
+  }
+
   if (!txt) {
     return;
   }
@@ -497,6 +550,18 @@ void TxtReaderActivity::renderStatusBar(const int orientedMarginRight, const int
     progressTextWidth = renderer.getTextWidth(SMALL_FONT_ID, progressStr);
     renderer.drawText(SMALL_FONT_ID, renderer.getScreenWidth() - orientedMarginRight - progressTextWidth, textY,
                       progressStr);
+
+    if (stopwatchRunning) {
+      // Target height: 12px (Matching Battery Height).
+      // Battery draws at textY + 6.
+
+      const int iconHeight = 12;
+      const int iconWidth = 10;
+      const int iconY = textY + 6;
+      const int iconX = renderer.getScreenWidth() - orientedMarginRight - progressTextWidth - iconWidth - 6;
+
+      GUI.drawStopwatchIcon(renderer, iconX, iconY, iconHeight);
+    }
   }
 
   if (showProgressBar) {
@@ -562,18 +627,6 @@ void TxtReaderActivity::loadProgress() {
 }
 
 bool TxtReaderActivity::loadPageIndexCache() {
-  // Cache file format (using serialization module):
-  // - uint32_t: magic "TXTI"
-  // - uint8_t: cache version
-  // - uint32_t: file size (to validate cache)
-  // - int32_t: viewport width
-  // - int32_t: lines per page
-  // - int32_t: font ID (to invalidate cache on font change)
-  // - int32_t: screen margin (to invalidate cache on margin change)
-  // - uint8_t: paragraph alignment (to invalidate cache on alignment change)
-  // - uint32_t: total pages count
-  // - N * uint32_t: page offsets
-
   std::string cachePath = txt->getCachePath() + "/index.bin";
   FsFile f;
   if (!Storage.openFileForRead("TRS", cachePath, f)) {
@@ -581,7 +634,6 @@ bool TxtReaderActivity::loadPageIndexCache() {
     return false;
   }
 
-  // Read and validate header using serialization module
   uint32_t magic;
   serialization::readPod(f, magic);
   if (magic != CACHE_MAGIC) {
@@ -649,7 +701,6 @@ bool TxtReaderActivity::loadPageIndexCache() {
   uint32_t numPages;
   serialization::readPod(f, numPages);
 
-  // Read page offsets
   pageOffsets.clear();
   pageOffsets.reserve(numPages);
 
@@ -673,7 +724,6 @@ void TxtReaderActivity::savePageIndexCache() const {
     return;
   }
 
-  // Write header using serialization module
   serialization::writePod(f, CACHE_MAGIC);
   serialization::writePod(f, CACHE_VERSION);
   serialization::writePod(f, static_cast<uint32_t>(txt->getFileSize()));
@@ -684,7 +734,6 @@ void TxtReaderActivity::savePageIndexCache() const {
   serialization::writePod(f, cachedParagraphAlignment);
   serialization::writePod(f, static_cast<uint32_t>(pageOffsets.size()));
 
-  // Write page offsets
   for (size_t offset : pageOffsets) {
     serialization::writePod(f, static_cast<uint32_t>(offset));
   }

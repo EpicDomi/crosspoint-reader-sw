@@ -79,6 +79,25 @@ void BaseTheme::drawBatteryRight(const GfxRenderer& renderer, Rect rect, const b
   drawBatteryIcon(renderer, rect.x, y, BaseMetrics::values.batteryWidth, rect.height, percentage);
 }
 
+void BaseTheme::drawStopwatchIcon(const GfxRenderer& renderer, int x, int y, int size) const {
+  const int buttonHeight = 2;
+  const int circleSize = size - buttonHeight;
+  const int cx = x + circleSize / 2;
+
+  // Draw button
+  // Cap
+  renderer.drawLine(cx - 2, y, cx + 2, y, 1, true);
+  // Stem
+  renderer.drawLine(cx, y, cx, y + buttonHeight, 1, true);
+
+  // Draw stopwatch body (circle) with thickness 1
+  renderer.drawRoundedRect(x, y + buttonHeight, circleSize, circleSize, 1, circleSize / 2, true);
+
+  // Draw single hand (needle) pointing up
+  const int cy = y + buttonHeight + circleSize / 2;
+  renderer.drawLine(cx, cy, cx, cy - (circleSize / 2 - 2), 1, true);
+}
+
 void BaseTheme::drawProgressBar(const GfxRenderer& renderer, Rect rect, const size_t current,
                                 const size_t total) const {
   if (total == 0) {

@@ -17,6 +17,11 @@ class TxtReaderActivity final : public ActivityWithSubactivity {
   const std::function<void()> onGoBack;
   const std::function<void()> onGoHome;
 
+  // Stopwatch feature
+  bool stopwatchRunning = false;
+  unsigned long stopwatchStartTime = 0;
+  int stopwatchPageDelta = 0;
+
   // Streaming text reader - stores file offsets for each page
   std::vector<size_t> pageOffsets;  // File offset for start of each page
   std::vector<std::string> currentPageLines;

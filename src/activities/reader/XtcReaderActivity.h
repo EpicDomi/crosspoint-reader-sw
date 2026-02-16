@@ -20,6 +20,11 @@ class XtcReaderActivity final : public ActivityWithSubactivity {
   const std::function<void()> onGoBack;
   const std::function<void()> onGoHome;
 
+  // Stopwatch feature
+  bool stopwatchRunning = false;
+  unsigned long stopwatchStartTime = 0;
+  int stopwatchPageDelta = 0;
+
   void renderPage();
   void saveProgress() const;
   void loadProgress();
