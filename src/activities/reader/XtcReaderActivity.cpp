@@ -11,11 +11,13 @@
 #include <GfxRenderer.h>
 #include <HalStorage.h>
 #include <I18n.h>
+#include <Logging.h>
 
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "MappedInputManager.h"
 #include "RecentBooksStore.h"
+#include "StopwatchPopupActivity.h"
 #include "XtcReaderChapterSelectionActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -65,6 +67,7 @@ void XtcReaderActivity::loop() {
               currentPage = std::get<PageResult>(result.data).page;
             }
           });
+      return;
     }
   }
 
@@ -88,6 +91,48 @@ void XtcReaderActivity::loop() {
                                                     mappedInput.wasReleased(MappedInputManager::Button::Left));
   const bool powerPageTurn = SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::PAGE_TURN &&
                              mappedInput.wasReleased(MappedInputManager::Button::Power);
+  const bool stopwatchTriggered = SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::STOPWATCH &&
+                                  mappedInput.wasReleased(MappedInputManager::Button::Power);
+
+  if (stopwatchTriggered) {
+    if (!stopwatchRunning) {
+      stopwatchRunning = true;
+      stopwatchStartTime = millis();
+      stopwatchPageDelta = 0;
+      requestUpdate();
+    } else {
+      stopwatchRunning = false;
+
+      if (stopwatchPageDelta <= 0) {
+        requestUpdate();
+        return;
+      }
+
+      unsigned long duration = millis() - stopwatchStartTime;
+      int pagesRead = stopwatchPageDelta;
+
+      int estimatedRemainingSeconds = -1;
+
+      // Use mutex for consistency, though Xtc might be safe
+      {
+        RenderLock lock(*this);
+        if (xtc && pagesRead > 0) {
+          int pagesRemaining = xtc->getPageCount() - currentPage - 1;
+          if (pagesRemaining < 0) pagesRemaining = 0;
+
+          unsigned long long durationMs64 = duration;
+          unsigned long long remainingMs = (durationMs64 * pagesRemaining) / pagesRead;
+          estimatedRemainingSeconds = remainingMs / 1000;
+        }
+      }
+
+      startActivityForResult(std::make_unique<StopwatchPopupActivity>(renderer, mappedInput, duration, pagesRead,
+                                                                      estimatedRemainingSeconds),
+                             [](const ActivityResult&) {});
+      return;
+    }
+  }
+
   const bool nextTriggered = usePressForPageTurn
                                  ? (mappedInput.wasPressed(MappedInputManager::Button::PageForward) || powerPageTurn ||
                                     mappedInput.wasPressed(MappedInputManager::Button::Right))
@@ -111,12 +156,15 @@ void XtcReaderActivity::loop() {
   if (prevTriggered) {
     if (currentPage >= static_cast<uint32_t>(skipAmount)) {
       currentPage -= skipAmount;
+      if (stopwatchRunning) stopwatchPageDelta -= skipAmount;
     } else {
       currentPage = 0;
+      if (stopwatchRunning) stopwatchPageDelta -= skipAmount;  // Or reset? Just subtract.
     }
     requestUpdate();
   } else if (nextTriggered) {
     currentPage += skipAmount;
+    if (stopwatchRunning) stopwatchPageDelta += skipAmount;
     if (currentPage >= xtc->getPageCount()) {
       currentPage = xtc->getPageCount();  // Allow showing "End of book"
     }

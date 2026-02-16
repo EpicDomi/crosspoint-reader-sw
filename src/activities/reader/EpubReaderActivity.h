@@ -35,6 +35,12 @@ class EpubReaderActivity final : public Activity {
   SavedPosition savedPositions[MAX_FOOTNOTE_DEPTH] = {};
   int footnoteDepth = 0;
 
+  // Stopwatch feature
+  bool stopwatchRunning = false;
+  unsigned long stopwatchStartTime = 0;
+  int stopwatchPageDelta = 0;
+  float stopwatchStartBookProgress = 0.0f;
+
   void renderContents(std::unique_ptr<Page> page, int orientedMarginTop, int orientedMarginRight,
                       int orientedMarginBottom, int orientedMarginLeft);
   void renderStatusBar() const;

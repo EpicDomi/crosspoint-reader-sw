@@ -18,6 +18,7 @@
 #include "MappedInputManager.h"
 #include "QrDisplayActivity.h"
 #include "RecentBooksStore.h"
+#include "StopwatchPopupActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/ScreenshotUtil.h"
@@ -176,6 +177,7 @@ void EpubReaderActivity::loop() {
                                onReaderMenuConfirm(static_cast<EpubReaderMenuActivity::MenuAction>(menu.action));
                              }
                            });
+    return;
   }
 
   // Long press BACK (1s+) goes to file selection
@@ -202,6 +204,64 @@ void EpubReaderActivity::loop() {
                                                     mappedInput.wasReleased(MappedInputManager::Button::Left));
   const bool powerPageTurn = SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::PAGE_TURN &&
                              mappedInput.wasReleased(MappedInputManager::Button::Power);
+  const bool stopwatchTriggered = SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::STOPWATCH &&
+                                  mappedInput.wasReleased(MappedInputManager::Button::Power);
+
+  if (stopwatchTriggered) {
+    if (!stopwatchRunning) {
+      stopwatchRunning = true;
+      stopwatchStartTime = millis();
+      stopwatchPageDelta = 0;
+
+      {
+        RenderLock lock(*this);
+        if (section && section->pageCount > 0) {
+          const float chapterProgress =
+              static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
+          stopwatchStartBookProgress = epub->calculateProgress(currentSpineIndex, chapterProgress);
+        } else {
+          stopwatchStartBookProgress = 0.0f;
+        }
+      }
+
+      requestUpdate();
+    } else {
+      stopwatchRunning = false;
+
+      // If we haven't progressed forward, just cancel without popup
+      if (stopwatchPageDelta <= 0) {
+        requestUpdate();  // Just to refresh icon off
+        return;
+      }
+
+      unsigned long duration = millis() - stopwatchStartTime;
+      int pagesRead = stopwatchPageDelta;
+
+      int estimatedRemainingSeconds = -1;
+
+      {
+        RenderLock lock(*this);
+        if (section && section->pageCount > 0) {
+          const float chapterProgress =
+              static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
+          float currentBookProgress = epub->calculateProgress(currentSpineIndex, chapterProgress);
+          float progressDelta = currentBookProgress - stopwatchStartBookProgress;
+
+          if (progressDelta > 0.0001f) {
+            float rate = duration / progressDelta;  // ms per 1.0 progress (full book)
+            float remainingProgress = 1.0f - currentBookProgress;
+            estimatedRemainingSeconds = (remainingProgress * rate) / 1000;
+          }
+        }
+      }
+
+      startActivityForResult(std::make_unique<StopwatchPopupActivity>(renderer, mappedInput, duration, pagesRead,
+                                                                      estimatedRemainingSeconds),
+                             [](const ActivityResult&) {});
+      return;
+    }
+  }
+
   const bool nextTriggered = usePressForPageTurn
                                  ? (mappedInput.wasPressed(MappedInputManager::Button::PageForward) || powerPageTurn ||
                                     mappedInput.wasPressed(MappedInputManager::Button::Right))
@@ -229,6 +289,12 @@ void EpubReaderActivity::loop() {
       RenderLock lock(*this);
       nextPageNumber = 0;
       currentSpineIndex = nextTriggered ? currentSpineIndex + 1 : currentSpineIndex - 1;
+      if (stopwatchRunning) {
+        if (nextTriggered)
+          stopwatchPageDelta++;
+        else
+          stopwatchPageDelta--;
+      }
       section.reset();
     }
     requestUpdate();
@@ -491,24 +557,28 @@ void EpubReaderActivity::pageTurn(bool isForwardTurn) {
   if (isForwardTurn) {
     if (section->currentPage < section->pageCount - 1) {
       section->currentPage++;
+      if (stopwatchRunning) stopwatchPageDelta++;
     } else {
       // We don't want to delete the section mid-render, so grab the semaphore
       {
         RenderLock lock(*this);
         nextPageNumber = 0;
         currentSpineIndex++;
+        if (stopwatchRunning) stopwatchPageDelta++;
         section.reset();
       }
     }
   } else {
     if (section->currentPage > 0) {
       section->currentPage--;
+      if (stopwatchRunning) stopwatchPageDelta--;
     } else if (currentSpineIndex > 0) {
       // We don't want to delete the section mid-render, so grab the semaphore
       {
         RenderLock lock(*this);
         nextPageNumber = UINT16_MAX;
         currentSpineIndex--;
+        if (stopwatchRunning) stopwatchPageDelta--;
         section.reset();
       }
     }
@@ -778,6 +848,34 @@ void EpubReaderActivity::renderStatusBar() const {
   }
 
   GUI.drawStatusBar(renderer, bookProgress, currentPage, pageCount, title, 0, textYOffset);
+
+  if (!stopwatchRunning || (!SETTINGS.statusBarBookProgressPercentage && !SETTINGS.statusBarChapterPageCount)) {
+    return;
+  }
+
+  auto metrics = UITheme::getInstance().getMetrics();
+  int orientedMarginTop, orientedMarginRight, orientedMarginBottom, orientedMarginLeft;
+  renderer.getOrientedViewableTRBL(&orientedMarginTop, &orientedMarginRight, &orientedMarginBottom,
+                                   &orientedMarginLeft);
+
+  char progressStr[32];
+  if (SETTINGS.statusBarBookProgressPercentage && SETTINGS.statusBarChapterPageCount) {
+    snprintf(progressStr, sizeof(progressStr), "%d/%d  %.0f%%", currentPage, static_cast<int>(pageCount), bookProgress);
+  } else if (SETTINGS.statusBarBookProgressPercentage) {
+    snprintf(progressStr, sizeof(progressStr), "%.0f%%", bookProgress);
+  } else {
+    snprintf(progressStr, sizeof(progressStr), "%d/%d", currentPage, static_cast<int>(pageCount));
+  }
+
+  const int textY = renderer.getScreenHeight() - UITheme::getInstance().getStatusBarHeight() - orientedMarginBottom - 4;
+  const int progressTextWidth = renderer.getTextWidth(SMALL_FONT_ID, progressStr);
+  const int iconHeight = 12;
+  const int iconWidth = 10;
+  const int iconX = renderer.getScreenWidth() - metrics.statusBarHorizontalMargin - orientedMarginRight -
+                    progressTextWidth - iconWidth - 6;
+  const int iconY = textY + 6;
+
+  GUI.drawStopwatchIcon(renderer, iconX, iconY, iconHeight);
 }
 
 void EpubReaderActivity::navigateToHref(const std::string& hrefStr, const bool savePosition) {

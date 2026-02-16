@@ -17,6 +17,10 @@ class XtcReaderActivity final : public Activity {
   uint32_t currentPage = 0;
   int pagesUntilFullRefresh = 0;
 
+  // Stopwatch feature
+  bool stopwatchRunning = false;
+  unsigned long stopwatchStartTime = 0;
+  int stopwatchPageDelta = 0;
   void renderPage();
   void saveProgress() const;
   void loadProgress();
