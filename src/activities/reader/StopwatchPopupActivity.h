@@ -2,10 +2,7 @@
 #include <EpdFontFamily.h>
 #include <HalDisplay.h>
 
-#include <functional>
-
 #include "../Activity.h"
-#include "util/ButtonNavigator.h"
 
 class StopwatchPopupActivity final : public Activity {
   unsigned long durationMs;

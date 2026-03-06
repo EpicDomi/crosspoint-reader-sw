@@ -154,20 +154,17 @@ void XtcReaderActivity::loop() {
   const int skipAmount = skipPages ? 10 : 1;
 
   if (prevTriggered) {
-    if (currentPage >= static_cast<uint32_t>(skipAmount)) {
-      currentPage -= skipAmount;
-      if (stopwatchRunning) stopwatchPageDelta -= skipAmount;
-    } else {
-      currentPage = 0;
-      if (stopwatchRunning) stopwatchPageDelta -= skipAmount;  // Or reset? Just subtract.
-    }
+    const uint32_t previousPage = currentPage;
+    currentPage = (currentPage >= static_cast<uint32_t>(skipAmount)) ? currentPage - skipAmount : 0;
+    if (stopwatchRunning) stopwatchPageDelta -= static_cast<int>(previousPage - currentPage);
     requestUpdate();
   } else if (nextTriggered) {
+    const uint32_t previousPage = currentPage;
     currentPage += skipAmount;
-    if (stopwatchRunning) stopwatchPageDelta += skipAmount;
     if (currentPage >= xtc->getPageCount()) {
       currentPage = xtc->getPageCount();  // Allow showing "End of book"
     }
+    if (stopwatchRunning) stopwatchPageDelta += static_cast<int>(currentPage - previousPage);
     requestUpdate();
   }
 }

@@ -39,12 +39,16 @@ class EpubReaderActivity final : public Activity {
   bool stopwatchRunning = false;
   unsigned long stopwatchStartTime = 0;
   int stopwatchPageDelta = 0;
-  float stopwatchStartBookProgress = 0.0f;
+  float stopwatchAccumulatedBookProgress = 0.0f;
+  float stopwatchLastBookProgress = 0.0f;
+  bool stopwatchProgressPendingSync = false;
 
   void renderContents(std::unique_ptr<Page> page, int orientedMarginTop, int orientedMarginRight,
                       int orientedMarginBottom, int orientedMarginLeft);
   void renderStatusBar() const;
   void saveProgress(int spineIndex, int currentPage, int pageCount);
+  bool tryGetCurrentBookProgress(float& progress) const;
+  void syncStopwatchBookProgress(bool accumulateDelta);
   // Jump to a percentage of the book (0-100), mapping it to spine and page.
   void jumpToPercent(int percent);
   void onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction action);

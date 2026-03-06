@@ -212,16 +212,10 @@ void EpubReaderActivity::loop() {
       stopwatchRunning = true;
       stopwatchStartTime = millis();
       stopwatchPageDelta = 0;
-
-      {
-        RenderLock lock(*this);
-        if (section && section->pageCount > 0) {
-          const float chapterProgress =
-              static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
-          stopwatchStartBookProgress = epub->calculateProgress(currentSpineIndex, chapterProgress);
-        } else {
-          stopwatchStartBookProgress = 0.0f;
-        }
+      stopwatchAccumulatedBookProgress = 0.0f;
+      stopwatchProgressPendingSync = false;
+      if (!tryGetCurrentBookProgress(stopwatchLastBookProgress)) {
+        stopwatchLastBookProgress = 0.0f;
       }
 
       requestUpdate();
@@ -241,15 +235,13 @@ void EpubReaderActivity::loop() {
 
       {
         RenderLock lock(*this);
-        if (section && section->pageCount > 0) {
-          const float chapterProgress =
-              static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
-          float currentBookProgress = epub->calculateProgress(currentSpineIndex, chapterProgress);
-          float progressDelta = currentBookProgress - stopwatchStartBookProgress;
+        float currentBookProgress = 0.0f;
+        if (tryGetCurrentBookProgress(currentBookProgress)) {
+          const float progressDelta = stopwatchAccumulatedBookProgress;
 
           if (progressDelta > 0.0001f) {
-            float rate = duration / progressDelta;  // ms per 1.0 progress (full book)
-            float remainingProgress = 1.0f - currentBookProgress;
+            const float rate = duration / progressDelta;  // ms per 1.0 progress (full book)
+            const float remainingProgress = 1.0f - currentBookProgress;
             estimatedRemainingSeconds = (remainingProgress * rate) / 1000;
           }
         }
@@ -290,10 +282,8 @@ void EpubReaderActivity::loop() {
       nextPageNumber = 0;
       currentSpineIndex = nextTriggered ? currentSpineIndex + 1 : currentSpineIndex - 1;
       if (stopwatchRunning) {
-        if (nextTriggered)
-          stopwatchPageDelta++;
-        else
-          stopwatchPageDelta--;
+        stopwatchLastBookProgress = epub->calculateProgress(currentSpineIndex, 0.0f);
+        stopwatchProgressPendingSync = false;
       }
       section.reset();
     }
@@ -553,32 +543,70 @@ void EpubReaderActivity::toggleAutoPageTurn(const uint8_t selectedPageTurnOption
   }
 }
 
+bool EpubReaderActivity::tryGetCurrentBookProgress(float& progress) const {
+  if (!epub || !section || section->pageCount == 0) {
+    return false;
+  }
+
+  const float chapterProgress = static_cast<float>(section->currentPage) / static_cast<float>(section->pageCount);
+  progress = epub->calculateProgress(currentSpineIndex, chapterProgress);
+  return true;
+}
+
+void EpubReaderActivity::syncStopwatchBookProgress(const bool accumulateDelta) {
+  float currentBookProgress = 0.0f;
+  if (!stopwatchRunning || !tryGetCurrentBookProgress(currentBookProgress)) {
+    return;
+  }
+
+  if (accumulateDelta) {
+    stopwatchAccumulatedBookProgress += currentBookProgress - stopwatchLastBookProgress;
+  }
+  stopwatchLastBookProgress = currentBookProgress;
+  stopwatchProgressPendingSync = false;
+}
+
 void EpubReaderActivity::pageTurn(bool isForwardTurn) {
   if (isForwardTurn) {
     if (section->currentPage < section->pageCount - 1) {
       section->currentPage++;
-      if (stopwatchRunning) stopwatchPageDelta++;
+      if (stopwatchRunning) {
+        stopwatchPageDelta++;
+        syncStopwatchBookProgress(true);
+      }
     } else {
       // We don't want to delete the section mid-render, so grab the semaphore
       {
         RenderLock lock(*this);
         nextPageNumber = 0;
         currentSpineIndex++;
-        if (stopwatchRunning) stopwatchPageDelta++;
+        if (stopwatchRunning) {
+          stopwatchPageDelta++;
+          const float nextBookProgress = epub->calculateProgress(currentSpineIndex, 0.0f);
+          stopwatchAccumulatedBookProgress += nextBookProgress - stopwatchLastBookProgress;
+          stopwatchLastBookProgress = nextBookProgress;
+          stopwatchProgressPendingSync = false;
+        }
         section.reset();
       }
     }
   } else {
     if (section->currentPage > 0) {
       section->currentPage--;
-      if (stopwatchRunning) stopwatchPageDelta--;
+      if (stopwatchRunning) {
+        stopwatchPageDelta--;
+        syncStopwatchBookProgress(true);
+      }
     } else if (currentSpineIndex > 0) {
       // We don't want to delete the section mid-render, so grab the semaphore
       {
         RenderLock lock(*this);
         nextPageNumber = UINT16_MAX;
         currentSpineIndex--;
-        if (stopwatchRunning) stopwatchPageDelta--;
+        if (stopwatchRunning) {
+          stopwatchPageDelta--;
+          stopwatchProgressPendingSync = true;
+        }
         section.reset();
       }
     }
@@ -684,6 +712,10 @@ void EpubReaderActivity::render(RenderLock&& lock) {
       }
       section->currentPage = newPage;
       pendingPercentJump = false;
+    }
+
+    if (stopwatchRunning && stopwatchProgressPendingSync) {
+      syncStopwatchBookProgress(true);
     }
   }
 
